@@ -50,7 +50,6 @@ deck_mount() {
         local parent_deckdir=$(dirname $parent)/.deck/$(basename $parent)
         cp $parent_deckdir/layers $deckdir/layers
         echo $parent_deckdir/upper >> $deckdir/layers
-        deck_ismounted $parent && deck_umount $parent
     else
         echo $parent > $deckdir/parent
         echo $parent > $deckdir/layers
