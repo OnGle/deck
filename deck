@@ -1,221 +1,285 @@
-#!/bin/bash -e
-# Copyright (c) TurnKey GNU/Linux - http://www.turnkeylinux.org
-#
-# This file is part of Deck
-#
-# Deck is free software; you can redistribute it and/or modify it
-# under the terms of the GNU General Public License as published by the
-# Free Software Foundation; either version 3 of the License, or (at your
-# option) any later version.
+#!/usr/bin/env python3
+from argparse import ArgumentParser
+from os.path import isfile, isdir, abspath, dirname, join, basename
+from os import listdir, makedirs, rmdir, chdir
+from shutil import copyfile, rmtree
+import sys
+try:
+    import colorama
+    colorama.init(autoreset=True)
+    RED = colorama.Fore.RED
+    RESET = colorama.Style.RESET_ALL
+except ImportError:
+    RED = ''
+    RESET = ''
 
-VERSION=2.0rc+
+VERSION='2.1rc'
 
-fatal() { echo "fatal: $@" 1>&2; exit 1; }
+def fatal(msg, exit=True):
+    print(RED+'Fatal:'+RESET, msg, file=sys.stderr)
+    if exit:
+        sys.exit(1)
 
-usage() {
-cat<<EOF
-Deck a filesystem using overlayfs (experimental)
-Syntax: $(basename "$0") path/to/dir/or/deck path/to/new/deck
-Syntax: $(basename "$0") [ -option ] path/to/existing/deck
+def path_to_parts(path):
+    ''' Splits a path into their parts
 
-Options:
-    -m|--mount      - mounts a deck (the default)
-    -u|--umount     - unmount a deck
-    -D|--delete     - delete a deck
-    -v|--version    - echo package version and exit
+    >>> path_to_parts('/an/example/path')
+    ['an', 'example', 'path']
 
-    --isdeck        - test if path is a deck
-    --isdirty       - test if deck is dirty
-    --ismounted     - test if deck is mounted
-    --list-layers   - list layers of a deck
+    '''
 
-EOF
-exit 1
-}
+    parts = []
+    while path:
+        path, part = os.path.split(path)
+        parts.append(part)
+    return list(filter(lambda x:x, parts[::-1]))
 
-deck_mount() {
-    local parent=$(realpath "$1")
-    local mountpath=$(realpath "$2")
-    [[ -d "$parent" ]] || fatal 'parent does not exist'
-    
-    if [[ -d "$mountpath" ]]; then
-        [[ -z $(find "$mountpath" -maxdepth 0 -empty) ]] || \
-            fatal 'mountpath exists but not empty'
-    fi
+def deck_mount(src, dest):
+    if not isdir(src):
+        fatal('parent does not exist!')
 
-    local deckdir="$(dirname "$mountpath")/.deck/$(basename "$mountpath")"
-    local workdir="$deckdir/work"
-    local upperdir="$deckdir/upper"
-    mkdir -p "$deckdir" "$workdir" "$upperdir"
+    if isdir(dest):
+        if listdir(dest):
+            fatal('mountpath exists but not empty')
 
-    if deck_isdeck "$parent"; then
-        echo "$parent" > "$deckdir/parent"
-        local parent_deckdir="$(dirname "$parent")/.deck/$(basename "$parent")"
-        cp "$parent_deckdir/layers" "$deckdir/layers"
-        sed -i "1i$parent_deckdir/upper" "$deckdir/layers"
-        deck_ismounted "$parent" && deck_umount "$parent"
-    else
-        echo "$parent" > "$deckdir/parent"
-        echo "$parent" > "$deckdir/layers"
-    fi
+    deckdir = join(dirname(dest), '.deck', basename(dest))
+    workdir = join(deckdir, 'work')
+    upperdir = join(deckdir, 'upper')
+    makedirs(deckdir, exist_ok=True)
+    makedirs(workdir, exist_ok=True)
+    makedirs(upperdir, exist_ok=True)
 
-    mkdir -p "$mountpath"
-    local lowerdir="$(cat "$deckdir/layers" | tr '\n' ':' | sed 's/:$//')"
-    local options="lowerdir=$lowerdir,upperdir=$upperdir,workdir=$workdir"
-    mount -t overlay overlay -o "$options" "$mountpath"
-}
+    if deck_isdeck(src):
+        with open(join(deckdir, 'parent'), 'w') as fob:
+            fob.write(src+'\n')
+        parent_deckdir = join(dirname(src), '.deck', basename(src))
+        copyfile(join(parent_deckdir, 'layers'), join(deckdir, 'layers'))
 
-deck_remount() {
-    local mountpath=$(realpath "$1")
-    [[ -d "$mountpath" ]] || fatal 'mountpath does not exist'
-    deck_ismounted "$mountpath" && fatal 'already mounted'
-    deck_isdeck "$mountpath" || fatal 'not a deck'
-    local deckdir="$(dirname "$mountpath")/.deck/$(basename "$mountpath")"
-    local parent=$(cat "$deckdir/parent")
-    deck_mount "$parent" "$mountpath"
-}
+        lines = []
+        with open(join(deckdir, 'layers')) as fob:
+            for line in fob:
+                lines.push(line)
+        with open(join(deckdir, 'layers'), 'w') as fob:
+            fob.write(join(parent_deckdir, 'upper') + '\n')
+            fob.writelines(lines)
+        if deck_ismounted(src):
+            deck_umount(src)
+    else:
+        with open(join(deckdir, 'parent'), 'w') as fob:
+            fob.write(src)
+        with open(join(deckdir, 'layers'), 'w') as fob:
+            fob.write(src)
 
-deck_umount() {
-    local mountpath=$(realpath "$1")
-    [[ -d "$mountpath" ]] || fatal 'mountpath does not exist'
-    deck_ismounted "$mountpath" || fatal 'not mounted'
-    umount "$mountpath"
-}
+    makedirs(mountpath, exist_ok=True)
+    with open(join(deckdir, 'layers'), 'r') as fob:
+        lowerdir = fob.read().replace('\n', ':').rstrip(':')
 
-deck_delete() {
-    local mountpath=$(realpath "$1")
-    local deckdir="$(dirname "$mountpath")/.deck/$(basename "$mountpath")"
-    [[ -d "$mountpath" ]] || fatal 'mountpath does not exist'
-    if deck_isdeck "$mountpath"; then
-        find "$(dirname "$deckdir")" -name 'parent' -print | grep -q "^${mountpath}$" && \
-            fatal 'cannot delete a parent deck'
+    options = f'lowerdir={lowerdir},upperdir={upperdir},workdir={workdir}'
+    subprocess.run([
+        'mount', '-t', 'overlay', '-o',
+        options, mountpath
+    ])
 
-        deck_ismounted "$mountpath" && umount "$mountpath"
-        rm -rf "$deckdir"
-    fi
-    rmdir "$mountpath"
-    rmdir --ignore-fail-on-non-empty "$(dirname "$deckdir")"
-}
+def deck_remount(mountpath):
+    if not isdir(mountpath):
+        fatal('mountpath does not exist')
 
-deck_isdirty() {
-    local mountpath=$(realpath "$1")
-    local deckdir="$(dirname "$mountpath")/.deck/$(basename "$mountpath")"
-    [[ -n "$(find "$deckdir/upper" -maxdepth 0 -empty)" ]] && return 1
-    return 0
-}
+    if deck_ismounted(mountpath):
+        fatal('already mounted')
 
-deck_isdeck() {
-    [[ -d "$1" ]] || return 1
-    local mountpath=$(realpath "$1")
-    local deckdir="$(dirname "$mountpath")/.deck/$(basename "$mountpath")"
-    [[ -d "$mountpath" ]] || return 1
-    [[ -d "$deckdir" ]] || return 1
-    [[ -d "$deckdir/work" ]] || return 255
-    [[ -d "$deckdir/upper" ]] || return 255
-    [[ -e "$deckdir/layers" ]] || return 255
-    [[ -e "$deckdir/parent" ]] || return 255
-    return 0
-}
+    if not deck_isdeck(mountpath):
+        fatal('not a deck')
 
-deck_ismounted() {
-    local mountpath=$(realpath "$1")
-    [[ -d "$mountpath" ]] || fatal 'mountpath does not exist'
-    mount | grep -q "^overlay on $mountpath type overlay" || return $?
-}
+    deckdir = join(dirname(mountpath), '.deck', basename(mountpath))
+    with open(join(deckdir, 'parent')) as fob:
+        parent = fob.read()
+    deck_mount(parent, mountpath)
 
-deck_version() {
+def deck_umount(mountpath):
+    if not isdir(mountpath):
+        fatal('mountpath does not exist')
 
-    unset version
-    if [[ -n $(readlink ${0}) ]]; then
-        bin_path="$(readlink ${0})"
-    else
-        bin_path="${0}"
-    fi
-    bin_dir="$(dirname ${bin_path})"
-    pkg_bin=/usr/bin/deck
+    if not deck_ismounted(mountpath):
+        fatal('not mounted')
 
-    if [[ -f ${bin_dir}/install.txt ]]; then
-        version="$(head -1 ${bin_dir}/install.txt)"
-    elif [[ -f ${bin_dir}/debian/changelog ]]; then
-        version="$(cd ${bin_dir} && dpkg-parsechangelog -ldebian/changelog -S Version)"
-    elif [[ -d ${bin_dir}/.git ]]; then
-        version="$(cd ${bin_dir} && autoversion HEAD)"
-    elif [[ ${bin_path} = ${pkg_bin} ]]; then
-        pkg_version="$(dpkg-query --showformat='${Version}' --show deck)"
-        no_pkg_string="dpkg-query: no packages found matching deck"
-        if [[ ${pkg_version} != ${no_pkg_string} ]]; then
-            version="${pkg_version}"
-        fi
-    fi
-    [[ -z ${version} ]] && version="${VERSION}"
+    subprocess.run(['umount', mountpath])
 
-    echo "${version}"
-    exit 0
-}
+def deck_delete(mountpath):
+    deckdir = join(dirname(mountpath), '.deck', basename(mountpath))
+    if not isdir(mountpath):
+        fatal('mountpath does not exist')
 
-opts=()
-args=()
-while [[ -n "$1" ]]; do
-    case "$1" in
-        -h|--help)  usage;;
-        -v|--version)
-                    deck_version;;
-        -*)         opts=("${opts[@]}" "$1");;
-        *)          args=("${args[@]}" "$1");;
-    esac
-    shift
-done
+    if deck_isdeck(mountpath):
+        layers = listdir(dirname(deckdir))
+        for layer in layers:
+            path = join(dirname(deckdir), layer, 'parent')
+            if isfile(path) and mountpath == path:
+                fatal('cannot delete a parent deck')
 
-[[ ${#args[@]} -eq 0 ]] && usage
-[[ ${#args[@]} -gt 2 ]] && fatal 'too many arguments'
-[[ ${#opts[@]} -gt 1 ]] && fatal 'conflicting deck options'
-[[ ${#opts[@]} -eq 0 ]] && opts=('--mount')
-action=${opts[0]}
+        if deck_ismounted(mountpath):
+            subprocess.run(['umount', mountpath])
+        
+        rmtree(deckdir)
+    rmtree(mountpath)
+    rmdir(mountpath)
+    rmdir(dirname(deckdir))
 
-case $action in
-    -u|--umount|-D|--delete|--isdeck|--ismounted|--show-layers)
-        [[ ${#args[@]} -eq 1 ]] || fatal 'missing argument';;
-esac
+def deck_list_layers(mountpath):
+    if not deck_isdeck(mountpath):
+        fatal(f'not a deck: {mountpath}')
+    deckdir = join(dirname(mountpath), '.deck', basename(mountpath))
+    print(join(deckdir, 'upper'))
+    lines = []
+    with open(join(deckdir, 'layers')) as fob:
+        for line in fob:
+            lines.append(line)
+    for line in lines[::-1]:
+        print(line)
 
-[ "$(id -u)" != "0" ] && fatal 'must be run as root'
-lsmod | grep -q overlay || fatal 'overlay module not loaded'
+def deck_isdirty(mountpath):
+    deckdir = join(dirname(mountpath), '.deck', basename(mountpath))
+    upperdir = join(deckdir, 'upper')
+    for path in listdir(upperdir):
+        if listdir(join(upperdir, path)):
+            sys.exit(1)
+    sys.exit(0)
 
-src="${args[0]}"
-maybe_dst="${args[1]}"
+def deck_isdeck(mountpath):
+    deckdir = join(dirname(mounthpath), '.deck', basename(mountpath))
+    if not isdir(mountpath):
+        sys.exit(1)
+    if not isdir(deckdir):
+        sys.exit(1)
+    if not isdir(join(deckdir, 'work')):
+        sys.exit(255)
+    if not isdir(join(deckdir, 'upper')):
+        sys.exit(255)
+    if not isdir(join(deckdir, 'layers')):
+        sys.exit(255)
+    if not isdir(join(deckdir, 'parent')):
+        sys.exit(255)
+    sys.exit(0)
 
-case $action in
-    -m|--mount)
-        if [[ -n "$maybe_dst" ]]; then
-            deck_mount "$src" "$maybe_dst"
-        else
-            deck_remount "$src"
-        fi
-        ;;
-    -u|--umount)
-        deck_umount "$src"
-        ;;
-    -D|--delete)
-        deck_delete "$src"
-        ;;
-    --isdeck)
-        exit $(deck_isdeck "$src")
-        ;;
-    --isdirty)
-        exit $(deck_isdirty "$src")
-        ;;
-    --ismounted)
-        exit $(deck_ismounted "$src")
-        ;;
-    --list-layers)
-        deck_isdeck "$src" || fatal "not a deck: $src"
-        mountpath=$(realpath "$src")
-        deckdir="$(dirname "$mountpath")/.deck/$(basename "$mountpath")"
-        echo "$deckdir/upper"
-        tac "$deckdir/layers"
-        ;;
-    *)
-        fatal "unrecognized option: $action"
-        ;;
-esac
+def deck_ismounted(mountpath):
+    if not isdir(mountpath):
+        fatal('mountpath doess not exist')
+    for line in subprocess.run(['mount'],
+            capture_output=True, text=True).stdout.splitlines():
+        if line.startswith(f'overlay on {mounthpath} type overlay'):
+            sys.exit(0)
+    sys.exit(1)
 
-exit 0
+def deck_version():
+    bin_path = abspath(__file__)
+    pkg_bin = '/usr/bin/deck'
+    bin_dir = dirname(bin_path)
+
+    version = None
+
+    if isfile(join(bin_dir, 'install.txt')):
+        with open(join(bin_dir, 'install.txt')) as fob:
+            version = fob.readline()
+    elif isfile(join(bin_path, 'debian', 'changelog')):
+        chdir(bin_dir)
+        version=subprocess.run(
+                ['dpkg-parsechangelog', '-ldebian/changelog', '-S', 'Version'],
+                capture_output=True, text=True).stdout
+    elif isdir(join(bin_dir, '.git')):
+        chdir(bin_dir)
+        version=subprocess.run(
+                ['autoversion', '-ldebian/changelog', '-S', 'Version'],
+                capture_output=True, text=True).stdout
+    elif bin_path == pkg_bin:
+        pkg_version=subprocess.run(
+                ['dpkg-query', "--showformat=${Version}", '--show', 'deck'],
+                capture_output=True, text=True).stdout
+        if pkg_version != 'dpkg-query: no packages found mmatching deck':
+            version = pkg_version
+
+    if version is None:
+        version = VERSION
+    print(version)
+    sys.exit(0)
+
+if __name__ == '__main__':
+    parser = ArgumentParser(
+        description='Deck a filesystem using overlayfs (experimental)')
+
+    parser.add_argument('deck', nargs='?', metavar='path/to/deck',
+            help='a directory or deck depending on context')
+    parser.add_argument('newdeck', nargs='?', metavar='path/to/new/deck',
+            help='path to new deck (only used when decking a previous deck or dir)')
+    parser.add_argument('-v', '--version', action='store_true',
+            help='print package version and exit')
+
+    grp = parser.add_mutually_exclusive_group()
+
+    grp.add_argument('-m', '--mount', action='store_true',
+            help='mounts a deck (the default)')
+    grp.add_argument('-u', '--umount', action='store_true',
+            help='unmount a deck')
+    grp.add_argument('-D', '--delete', action='store_true',
+            help='delete a deck')
+
+    grp.add_argument('--isdeck', action='store_true',
+            help='test if a path is a deck')
+    grp.add_argument('--isdirty', action='store_true',
+            help='test if a path is dirty')
+    grp.add_argument('--ismounted', action='store_true',
+            help='test if a deck is mounted')
+    grp.add_argument('--list-layers', action='store_true',
+            help='list layers of a deck')
+
+    args = parser.parse_args()
+
+    if not any((args.mount, args.umount, args.delete, args.delete, args.version,
+            args.isdeck, args.isdirty, args.ismounted, args.list_layers)):
+        args.mount = True
+
+    deck = abspath(args.deck) if args.deck else None
+    newdeck = abspath(args.newdeck) if args.newdeck else None
+
+    if not args.version and not args.deck:
+        fatal('argument: "/path/to/deck" is required!', exit=False)
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+
+    if newdeck:
+        errmsg = ' incompatible with decking a deck/dir to new deck'
+        if args.umount:
+            fatal('-u/--umount' + errmsg)
+        elif args.delete:
+            fatal('-D/--delete' + errmsg)
+        elif args.version:
+            fatal('-v/--version' + errmsg)
+
+        elif args.isdeck:
+            fatal('--isdeck' + errmsg)
+        elif args.isdirty:
+            fatal('--isdirty' + errmsg)
+        elif args.ismounted:
+            fatal('--ismounted' + errmsg)
+        elif args.list_layers:
+            fatal('--list-layers' + errmsg)
+
+        elif args.mount:
+            deck_mount(deck, newdeck)
+        else:
+            fatal('invalid program state: if you\'re seeing this, it\'s a bug!')
+    else:
+        if args.mount:
+            deck_remount(deck)
+        elif args.umount:
+            deck_umount(deck)
+        elif args.isdeck:
+            deck_isdeck(deck)
+        elif args.isdirty:
+            deck_isdirty(deck)
+        elif args.ismounted:
+            deck_ismounted(deck)
+        elif args.list_layers:
+            deck_list_layers(deck)
+        elif args.version:
+            deck_version()
+        else:
+            fatal('invalid program state: if you\'re seeing this, it\'s a bug!')
